@@ -43,10 +43,13 @@ public final class FreeCam {
         if (cam == null) return;
         float yaw = cam.getYaw() + (float) dx * 0.15f;
         float pitch = MathHelper.clamp(cam.getPitch() + (float) dy * 0.15f, -90f, 90f);
-        cam.setYaw(yaw);
-        cam.setPitch(pitch);
-        cam.prevYaw = yaw;
-        cam.prevPitch = pitch;
+        // refreshPositionAndAngles сбрасывает и "прошлый" угол (без интерполяции), поэтому
+        // запоминаем и возвращаем lastRender-позицию, чтобы движение осталось плавным
+        double lx = cam.lastRenderX, ly = cam.lastRenderY, lz = cam.lastRenderZ;
+        cam.refreshPositionAndAngles(cam.getX(), cam.getY(), cam.getZ(), yaw, pitch);
+        cam.lastRenderX = lx;
+        cam.lastRenderY = ly;
+        cam.lastRenderZ = lz;
     }
 
     public static void tick(MinecraftClient mc) {

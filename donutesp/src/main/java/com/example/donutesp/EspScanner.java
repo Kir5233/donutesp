@@ -42,9 +42,9 @@ public final class EspScanner {
         }
 
         ClientWorld world = mc.world;
-        Vec3d c = FreeCam.active && FreeCam.cam != null ? FreeCam.cam.getPos() : mc.player.getPos();
-        int cx = ((int) Math.floor(c.x)) >> 4;
-        int cz = ((int) Math.floor(c.z)) >> 4;
+        net.minecraft.entity.Entity c = FreeCam.active && FreeCam.cam != null ? FreeCam.cam : mc.player;
+        int cx = ((int) Math.floor(c.getX())) >> 4;
+        int cz = ((int) Math.floor(c.getZ())) >> 4;
         int r = EspConfig.radiusChunks;
 
         Map<Identifier, List<BlockPos>> result = new HashMap<>();
