@@ -10,7 +10,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(Entity.class)
 public class EntityMixin {
-    @Inject(method = "changeLookDirection", at = @At("HEAD"), cancellable = true)
+    @Inject(method = "changeLookDirection", at = @At("HEAD"), cancellable = true, require = 0)
     private void donutesp$freecamLook(double dx, double dy, CallbackInfo ci) {
         if (FreeCam.active && (Object) this == MinecraftClient.getInstance().player) {
             FreeCam.look(dx, dy);

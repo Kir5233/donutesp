@@ -6,6 +6,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.entity.Entity;
+import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 
@@ -13,9 +14,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * ESP через HUD: позиции блоков сами проецируем на экран и рисуем рамки через DrawContext.fill.
- * Не использует внутренних рендер-пайплайнов, поэтому почти не ломается между версиями.
- * Рамки видны сквозь стены (рисуются поверх мира).
+ * Отрисовка через HUD: позиции блоков сами проецируем на экран и рисуем рамки через DrawContext.fill.
+ * Не использует внутренних рендер-пайплайнов. Рамки видны сквозь стены (рисуются поверх мира).
+ * Здесь же рисуется список Stash Finder и подпись FreeCam.
  */
 public final class EspRenderer {
     private static long tickStart = System.nanoTime();
@@ -34,72 +35,118 @@ public final class EspRenderer {
         return a + (b - a) * t;
     }
 
+    /** Параметры камеры на текущий кадр. */
+    private static final class View {
+        double ex, ey, ez;
+        double fx, fy, fz, rx, rz, ux, uy, uz;
+        double tanHalf, aspect;
+        int sw, sh;
+
+        static View of(MinecraftClient mc, Entity e) {
+            View v = new View();
+            double td = Math.max(0.0, Math.min(1.0, (System.nanoTime() - tickStart) / 50_000_000.0));
+            v.ex = lerp(td, e.lastRenderX, e.getX());
+            v.ey = lerp(td, e.lastRenderY, e.getY()) + (e.getEyeY() - e.getY());
+            v.ez = lerp(td, e.lastRenderZ, e.getZ());
+
+            double yaw = Math.toRadians(e.getYaw());
+            double pitch = Math.toRadians(e.getPitch());
+            v.fx = -Math.sin(yaw) * Math.cos(pitch);
+            v.fy = -Math.sin(pitch);
+            v.fz = Math.cos(yaw) * Math.cos(pitch);
+            v.rx = -Math.cos(yaw);
+            v.rz = -Math.sin(yaw);
+            v.ux = -v.rz * v.fy;
+            v.uy = v.rz * v.fx - v.rx * v.fz;
+            v.uz = v.rx * v.fy;
+
+            v.sw = mc.getWindow().getScaledWidth();
+            v.sh = mc.getWindow().getScaledHeight();
+            v.tanHalf = Math.tan(Math.toRadians(mc.options.getFov().getValue()) / 2.0);
+            v.aspect = (double) v.sw / (double) v.sh;
+            return v;
+        }
+    }
+
+    private static void drawBlock(DrawContext ctx, View v, BlockPos p, int color) {
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE;
+
+        for (int i = 0; i < 8; i++) {
+            double dx = p.getX() + (i & 1) - v.ex;
+            double dy = p.getY() + ((i >> 1) & 1) - v.ey;
+            double dz = p.getZ() + ((i >> 2) & 1) - v.ez;
+            double z = dx * v.fx + dy * v.fy + dz * v.fz;
+            if (z <= 0.05) return;
+            double x = dx * v.rx + dz * v.rz;
+            double y = dx * v.ux + dy * v.uy + dz * v.uz;
+            double sx = (x / (z * v.tanHalf * v.aspect) * 0.5 + 0.5) * v.sw;
+            double sy = (0.5 - y / (z * v.tanHalf) * 0.5) * v.sh;
+            if (sx < minX) minX = sx;
+            if (sx > maxX) maxX = sx;
+            if (sy < minY) minY = sy;
+            if (sy > maxY) maxY = sy;
+        }
+        if (maxX < 0 || minX > v.sw || maxY < 0 || minY > v.sh) return;
+
+        int x1 = (int) Math.max(-1000, minX);
+        int y1 = (int) Math.max(-1000, minY);
+        int x2 = (int) Math.min(v.sw + 1000, maxX);
+        int y2 = (int) Math.min(v.sh + 1000, maxY);
+        if (x2 - x1 < 3) x2 = x1 + 3;
+        if (y2 - y1 < 3) y2 = y1 + 3;
+
+        ctx.fill(x1, y1, x2, y1 + 1, color);
+        ctx.fill(x1, y2 - 1, x2, y2, color);
+        ctx.fill(x1, y1, x1 + 1, y2, color);
+        ctx.fill(x2 - 1, y1, x2, y2, color);
+    }
+
     private static void render(DrawContext ctx) {
         MinecraftClient mc = MinecraftClient.getInstance();
-        if (!EspConfig.espEnabled || mc.world == null) return;
+        if (mc.world == null || mc.player == null) return;
         Entity e = mc.getCameraEntity();
-        if (e == null) return;
-        Map<Identifier, List<BlockPos>> found = EspScanner.found;
-        if (found.isEmpty()) return;
+        if (e == null) e = mc.player;
+        View v = View.of(mc, e);
 
-        double td = Math.max(0.0, Math.min(1.0, (System.nanoTime() - tickStart) / 50_000_000.0));
-        double ex = lerp(td, e.lastRenderX, e.getX());
-        double ey = lerp(td, e.lastRenderY, e.getY()) + (e.getEyeY() - e.getY());
-        double ez = lerp(td, e.lastRenderZ, e.getZ());
-
-        double yaw = Math.toRadians(e.getYaw());
-        double pitch = Math.toRadians(e.getPitch());
-        double fx = -Math.sin(yaw) * Math.cos(pitch);
-        double fy = -Math.sin(pitch);
-        double fz = Math.cos(yaw) * Math.cos(pitch);
-        double rx = -Math.cos(yaw);
-        double rz = -Math.sin(yaw);
-        double ux = -rz * fy;
-        double uy = rz * fx - rx * fz;
-        double uz = rx * fy;
-
-        int sw = mc.getWindow().getScaledWidth();
-        int sh = mc.getWindow().getScaledHeight();
-        double tanHalf = Math.tan(Math.toRadians(mc.options.getFov().getValue()) / 2.0);
-        double aspect = (double) sw / (double) sh;
-
-        for (Map.Entry<Identifier, List<BlockPos>> entry : found.entrySet()) {
-            int color = 0xFF000000 | colorFor(entry.getKey());
-            for (BlockPos p : entry.getValue()) {
-                double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE;
-                double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE;
-                boolean ok = true;
-
-                for (int i = 0; i < 8 && ok; i++) {
-                    double dx = p.getX() + (i & 1) - ex;
-                    double dy = p.getY() + ((i >> 1) & 1) - ey;
-                    double dz = p.getZ() + ((i >> 2) & 1) - ez;
-                    double z = dx * fx + dy * fy + dz * fz;
-                    if (z <= 0.05) { ok = false; break; }
-                    double x = dx * rx + dz * rz;
-                    double y = dx * ux + dy * uy + dz * uz;
-                    double sx = (x / (z * tanHalf * aspect) * 0.5 + 0.5) * sw;
-                    double sy = (0.5 - y / (z * tanHalf) * 0.5) * sh;
-                    if (sx < minX) minX = sx;
-                    if (sx > maxX) maxX = sx;
-                    if (sy < minY) minY = sy;
-                    if (sy > maxY) maxY = sy;
-                }
-                if (!ok) continue;
-                if (maxX < 0 || minX > sw || maxY < 0 || minY > sh) continue;
-
-                int x1 = (int) Math.max(-1000, minX);
-                int y1 = (int) Math.max(-1000, minY);
-                int x2 = (int) Math.min(sw + 1000, maxX);
-                int y2 = (int) Math.min(sh + 1000, maxY);
-                if (x2 - x1 < 3) { x2 = x1 + 3; }
-                if (y2 - y1 < 3) { y2 = y1 + 3; }
-
-                ctx.fill(x1, y1, x2, y1 + 1, color);
-                ctx.fill(x1, y2 - 1, x2, y2, color);
-                ctx.fill(x1, y1, x1 + 1, y2, color);
-                ctx.fill(x2 - 1, y1, x2, y2, color);
+        // ESP по выбранным блокам
+        if (EspConfig.espEnabled) {
+            for (Map.Entry<Identifier, List<BlockPos>> entry : EspScanner.found.entrySet()) {
+                int color = 0xFF000000 | colorFor(entry.getKey());
+                for (BlockPos p : entry.getValue()) drawBlock(ctx, v, p, color);
             }
+        }
+
+        // Stash Finder: контейнеры в найденных чанках + список слева сверху
+        if (EspConfig.stashEnabled) {
+            List<StashFinder.Stash> list = StashFinder.stashes;
+            for (StashFinder.Stash s : list) {
+                for (BlockPos p : s.containers) drawBlock(ctx, v, p, 0xFFFFA500);
+            }
+            int y = 6;
+            ctx.drawTextWithShadow(mc.textRenderer,
+                    Text.literal("Stash Finder: " + list.size() + " найдено (порог " + EspConfig.stashMin + ")"),
+                    6, y, 0xFFFFD52E);
+            y += 11;
+            int shown = 0;
+            for (StashFinder.Stash s : list) {
+                if (shown++ >= 6) break;
+                double dx = s.centerX() - e.getX();
+                double dz = s.centerZ() - e.getZ();
+                int dist = (int) Math.sqrt(dx * dx + dz * dz);
+                ctx.drawTextWithShadow(mc.textRenderer,
+                        Text.literal(shown + ". X " + s.centerX() + " Z " + s.centerZ()
+                                + "  [" + s.count + "]  " + dist + "м"),
+                        6, y, 0xFFFFFFFF);
+                y += 10;
+            }
+        }
+
+        // статус FreeCam
+        if (FreeCam.active) {
+            Text t = Text.literal("FREECAM  x" + FreeCam.speedText() + "   (PgUp/PgDn скорость, Ctrl быстро, Alt медленно)");
+            int w = mc.textRenderer.getWidth(t);
+            ctx.drawTextWithShadow(mc.textRenderer, t, (v.sw - w) / 2, v.sh - 52, 0xFF7CFC00);
         }
     }
 
