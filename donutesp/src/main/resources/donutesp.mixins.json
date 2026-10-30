@@ -3,6 +3,6 @@
   "minVersion": "0.8",
   "package": "com.example.donutesp.mixin",
   "compatibilityLevel": "JAVA_21",
-  "client": ["EntityMixin", "BlockMixin"],
+  "client": ["BlockMixin"],
   "injectors": { "defaultRequire": 1 }
 }

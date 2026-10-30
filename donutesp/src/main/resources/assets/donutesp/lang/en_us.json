@@ -3,5 +3,6 @@
   "key.donutesp.menu": "Открыть меню",
   "key.donutesp.freecam": "FreeCam",
   "key.donutesp.speed_up": "FreeCam: скорость +",
-  "key.donutesp.speed_down": "FreeCam: скорость -"
+  "key.donutesp.speed_down": "FreeCam: скорость -",
+  "key.donutesp.zoom": "Zoom (держать)"
 }

@@ -10,16 +10,24 @@ import org.lwjgl.glfw.GLFW;
 import java.util.UUID;
 
 /**
- * FreeCam: камера — отдельная сущность, настоящий игрок стоит на месте.
- * Улучшения: плавный разгон/торможение, регулируемая скорость (PageUp/PageDown или меню),
- * Ctrl — ускорение, Alt — медленно, стрелки — поворот (если мышь не перехвачена),
- * блокировка ударов/использования, авто-выход при получении урона.
+ * FreeCam без mixin'ов.
+ *
+ * Камера — отдельная сущность. Мышь вращает настоящего игрока как обычно, а мы каждый кадр
+ * переносим это вращение на камеру и каждый тик возвращаем игрока в замороженный угол
+ * (на сервер уходит неподвижный поворот). Если игра сама вращает камеру-сущность — это тоже учитывается.
+ * Стрелки на клавиатуре тоже поворачивают камеру.
  */
 public final class FreeCam {
     public static boolean active;
     public static OtherClientPlayerEntity cam;
 
     private static double vx, vy, vz;
+
+    private static float camYaw, camPitch;          // "истинный" угол камеры
+    private static float camYawSet, camPitchSet;    // что мы последний раз записали в камеру
+    private static float frozenYaw, frozenPitch;    // угол, в котором держим игрока
+    private static float plYawSeen, plPitchSeen;    // угол игрока, который мы уже учли
+    private static float origYaw, origPitch;        // чтобы вернуть игроку после выхода
 
     private FreeCam() {}
 
@@ -29,10 +37,26 @@ public final class FreeCam {
 
     private static void enable(MinecraftClient mc) {
         if (mc.world == null || mc.player == null) return;
+        origYaw = mc.player.getYaw();
+        origPitch = mc.player.getPitch();
+
         cam = new OtherClientPlayerEntity(mc.world, new GameProfile(UUID.randomUUID(), "freecam"));
         cam.copyPositionAndRotation(mc.player);
-        cam.refreshPositionAndAngles(mc.player.getX(), mc.player.getY(), mc.player.getZ(),
-                mc.player.getYaw(), mc.player.getPitch());
+        cam.refreshPositionAndAngles(mc.player.getX(), mc.player.getY(), mc.player.getZ(), origYaw, origPitch);
+
+        camYaw = origYaw;
+        camPitch = origPitch;
+        camYawSet = cam.getYaw();
+        camPitchSet = cam.getPitch();
+
+        // игрока держим на pitch 0, чтобы вверх/вниз камера могла вращаться симметрично
+        frozenYaw = origYaw;
+        frozenPitch = 0f;
+        mc.player.setYaw(frozenYaw);
+        mc.player.setPitch(frozenPitch);
+        plYawSeen = frozenYaw;
+        plPitchSeen = frozenPitch;
+
         vx = vy = vz = 0;
         mc.setCameraEntity(cam);
         active = true;
@@ -42,6 +66,8 @@ public final class FreeCam {
     public static void disable(MinecraftClient mc) {
         if (mc.player != null) {
             mc.setCameraEntity(mc.player);
+            mc.player.setYaw(origYaw);
+            mc.player.setPitch(origPitch);
             if (active) message(mc, "§cFreeCam ВЫКЛ");
         }
         active = false;
@@ -62,23 +88,32 @@ public final class FreeCam {
         if (mc.player != null) mc.player.sendMessage(Text.literal(text), true);
     }
 
-    /** Поворот камеры в градусах. */
-    private static void rotate(float dYaw, float dPitch) {
-        if (cam == null) return;
-        float yaw = cam.getYaw() + dYaw;
-        float pitch = MathHelper.clamp(cam.getPitch() + dPitch, -90f, 90f);
-        // refreshPositionAndAngles сбрасывает и "прошлый" угол (нет задержки интерполяции),
-        // поэтому сохраняем и возвращаем lastRender-позицию, чтобы движение осталось плавным
+    /** Записать истинный угол в сущность-камеру, не ломая плавность движения. */
+    private static void writeCam() {
         double lx = cam.lastRenderX, ly = cam.lastRenderY, lz = cam.lastRenderZ;
-        cam.refreshPositionAndAngles(cam.getX(), cam.getY(), cam.getZ(), yaw, pitch);
+        cam.refreshPositionAndAngles(cam.getX(), cam.getY(), cam.getZ(), camYaw, camPitch);
         cam.lastRenderX = lx;
         cam.lastRenderY = ly;
         cam.lastRenderZ = lz;
+        camYawSet = cam.getYaw();
+        camPitchSet = cam.getPitch();
     }
 
-    /** Вызывается из EntityMixin при движении мыши. */
-    public static void look(double dx, double dy) {
-        rotate((float) dx * 0.15f, (float) dy * 0.15f);
+    /** Перенос поворота мыши на камеру. Вызывается каждый кадр (из HUD) и каждый тик. */
+    public static void sync(MinecraftClient mc) {
+        if (!active || cam == null || mc.player == null) return;
+
+        float dpY = mc.player.getYaw() - plYawSeen;
+        float dpP = mc.player.getPitch() - plPitchSeen;
+        float dcY = cam.getYaw() - camYawSet;
+        float dcP = cam.getPitch() - camPitchSet;
+        plYawSeen = mc.player.getYaw();
+        plPitchSeen = mc.player.getPitch();
+
+        if (dpY == 0 && dpP == 0 && dcY == 0 && dcP == 0) return;
+        camYaw = camYaw + dpY + dcY;
+        camPitch = MathHelper.clamp(camPitch + dpP + dcP, -90f, 90f);
+        writeCam();
     }
 
     public static void tick(MinecraftClient mc) {
@@ -93,6 +128,13 @@ public final class FreeCam {
             disable(mc);
             return;
         }
+
+        // учесть поворот мыши и вернуть игрока в замороженный угол ДО отправки пакетов
+        sync(mc);
+        mc.player.setYaw(frozenYaw);
+        mc.player.setPitch(frozenPitch);
+        plYawSeen = frozenYaw;
+        plPitchSeen = frozenPitch;
 
         // замораживаем настоящего игрока и блокируем клики
         mc.options.forwardKey.setPressed(false);
@@ -116,20 +158,23 @@ public final class FreeCam {
         boolean fast = !typing && down(h, GLFW.GLFW_KEY_LEFT_CONTROL);
         boolean slow = !typing && down(h, GLFW.GLFW_KEY_LEFT_ALT);
 
-        // запасной поворот стрелками (на случай если перехват мыши не сработал)
+        // поворот стрелками
         if (!typing) {
             float ry = 0, rp = 0;
             if (down(h, GLFW.GLFW_KEY_LEFT)) ry -= 4f;
             if (down(h, GLFW.GLFW_KEY_RIGHT)) ry += 4f;
             if (down(h, GLFW.GLFW_KEY_UP)) rp -= 4f;
             if (down(h, GLFW.GLFW_KEY_DOWN)) rp += 4f;
-            if (ry != 0 || rp != 0) rotate(ry, rp);
+            if (ry != 0 || rp != 0) {
+                camYaw += ry;
+                camPitch = MathHelper.clamp(camPitch + rp, -90f, 90f);
+                writeCam();
+            }
         }
 
         double speed = EspConfig.camSpeed * 0.5 * (fast ? 2.5 : 1.0) * (slow ? 0.3 : 1.0);
-        double yaw = Math.toRadians(cam.getYaw());
-        double pitch = Math.toRadians(cam.getPitch());
-        // вперёд — туда, куда смотрим (включая вверх/вниз)
+        double yaw = Math.toRadians(camYaw);
+        double pitch = Math.toRadians(camPitch);
         double fx = -Math.sin(yaw) * Math.cos(pitch);
         double fy = -Math.sin(pitch);
         double fz = Math.cos(yaw) * Math.cos(pitch);
@@ -151,7 +196,6 @@ public final class FreeCam {
             ty = my / len * speed;
             tz = mz / len * speed;
         }
-        // плавный разгон и торможение
         vx += (tx - vx) * 0.35;
         vy += (ty - vy) * 0.35;
         vz += (tz - vz) * 0.35;
@@ -163,6 +207,10 @@ public final class FreeCam {
         cam.lastRenderY = cam.getY();
         cam.lastRenderZ = cam.getZ();
         cam.setPosition(cam.getX() + vx, cam.getY() + vy, cam.getZ() + vz);
+    }
+
+    /** Оставлено для совместимости со старым EntityMixin; больше не используется. */
+    public static void look(double dx, double dy) {
     }
 
     private static boolean down(long handle, int key) {
